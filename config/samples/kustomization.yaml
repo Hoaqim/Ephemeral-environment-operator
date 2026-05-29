@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- ephemeral_v1alpha1_ephemeralenvironment.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

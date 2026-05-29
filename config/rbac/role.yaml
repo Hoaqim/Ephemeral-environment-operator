@@ -1,0 +1,32 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ephemeral.hoaqim.dev
+  resources:
+  - ephemeralenvironments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ephemeral.hoaqim.dev
+  resources:
+  - ephemeralenvironments/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - ephemeral.hoaqim.dev
+  resources:
+  - ephemeralenvironments/status
+  verbs:
+  - get
+  - patch
+  - update

@@ -1,0 +1,9 @@
+apiVersion: ephemeral.hoaqim.dev/v1alpha1
+kind: EphemeralEnvironment
+metadata:
+  labels:
+    app.kubernetes.io/name: ee-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: ephemeralenvironment-sample
+spec:
+  # TODO(user): Add fields here
