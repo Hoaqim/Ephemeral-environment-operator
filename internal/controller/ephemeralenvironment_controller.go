@@ -47,7 +47,8 @@ type EphemeralEnvironmentReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
 func (r *EphemeralEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	logger := logf.FromContext(ctx)
+	logger.Info("reconciling EphemeralEnvironment", "request", req.NamespacedName)
 
 	// TODO(user): your logic here
 

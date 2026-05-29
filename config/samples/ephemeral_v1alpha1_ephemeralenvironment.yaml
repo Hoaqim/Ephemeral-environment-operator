@@ -6,4 +6,11 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: ephemeralenvironment-sample
 spec:
-  # TODO(user): Add fields here
+  ttl: "5m"
+  template:
+    spec:
+      containers:
+        - name: web
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
