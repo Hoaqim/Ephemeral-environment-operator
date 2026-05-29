@@ -1,0 +1,1 @@
+Applying an EphemeralEnvironment CR provisions a namespace containing a Deployment running the specified image, exposed via a Service; the namespace and everything in it is deleted when the TTL expires; deleting the CR early tears the namespace down immediately. All of this is covered by envtest plus one Ginkgo e2e test on Kind.
