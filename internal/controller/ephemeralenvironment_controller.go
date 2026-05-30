@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"maps"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -32,7 +31,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	ephemeralv1alpha1 "github.com/Hoaqim/EE-operator/api/v1alpha1"
 )
@@ -53,79 +52,131 @@ type EphemeralEnvironmentReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 
 func (r *EphemeralEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := logf.FromContext(ctx)
 	var ee ephemeralv1alpha1.EphemeralEnvironment
 	if err := r.Get(ctx, req.NamespacedName, &ee); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	if !ee.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(&ee, ephemeralFinalizer) {
-			if ee.Status.Namespace != "" {
-				ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ee.Status.Namespace}}
-				if err := r.Delete(ctx, ns); err != nil && !apierrors.IsNotFound(err) {
-					return ctrl.Result{}, err
-				}
-				logger.Info("deleted namespace", "namespace", ee.Status.Namespace)
-			}
-			controllerutil.RemoveFinalizer(&ee, ephemeralFinalizer)
-			if err := r.Update(ctx, &ee); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
+		return r.reconcileDelete(ctx, &ee)
 	}
 
 	if !controllerutil.ContainsFinalizer(&ee, ephemeralFinalizer) {
-		controllerutil.AddFinalizer(&ee, ephemeralFinalizer)
-		if err := r.Update(ctx, &ee); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+		return r.ensureFinalizer(ctx, &ee)
 	}
 
-	if ee.Status.ExpiresAt != nil && time.Now().After(ee.Status.ExpiresAt.Time) {
-		logger.Info("TTL expired, deleting environment", "expiresAt", ee.Status.ExpiresAt)
-		base := ee.DeepCopy()
-		ee.Status.Phase = ephemeralv1alpha1.PhaseExpiring
-		if err := r.Status().Patch(ctx, &ee, client.MergeFrom(base)); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.Delete(ctx, &ee); err != nil {
-			return ctrl.Result{}, client.IgnoreNotFound(err)
-		}
-		return ctrl.Result{}, nil
+	if r.isExpired(&ee) {
+		return r.reconcileExpiry(ctx, &ee)
 	}
 
+	return r.reconcileNormal(ctx, &ee)
+}
+
+func (r *EphemeralEnvironmentReconciler) reconcileDelete(ctx context.Context, ee *ephemeralv1alpha1.EphemeralEnvironment) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if controllerutil.ContainsFinalizer(ee, ephemeralFinalizer) {
+		if ee.Status.Namespace != "" {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ee.Status.Namespace}}
+			if err := r.Delete(ctx, ns); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+			logger.Info("deleted namespace", "namespace", ee.Status.Namespace)
+		}
+		controllerutil.RemoveFinalizer(ee, ephemeralFinalizer)
+		if err := r.Update(ctx, ee); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *EphemeralEnvironmentReconciler) ensureFinalizer(ctx context.Context, ee *ephemeralv1alpha1.EphemeralEnvironment) (ctrl.Result, error) {
+	controllerutil.AddFinalizer(ee, ephemeralFinalizer)
+	if err := r.Update(ctx, ee); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *EphemeralEnvironmentReconciler) reconcileExpiry(ctx context.Context, ee *ephemeralv1alpha1.EphemeralEnvironment) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("TTL expired, deleting environment", "expiresAt", ee.Status.ExpiresAt)
+
+	base := ee.DeepCopy()
+	ee.Status.Phase = ephemeralv1alpha1.PhaseExpiring
+	if err := r.Status().Patch(ctx, ee, client.MergeFrom(base)); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.Delete(ctx, ee); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *EphemeralEnvironmentReconciler) reconcileNormal(ctx context.Context, ee *ephemeralv1alpha1.EphemeralEnvironment) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
 	labels := map[string]string{
 		"app.kubernetes.io/managed-by": "ephemeral-environment-operator",
 		"ephemeral.hoaqim.dev/owner":   ee.Name,
 	}
 
-	if ee.Status.Namespace == "" {
-		base := ee.DeepCopy()
-		ee.Status.Namespace = fmt.Sprintf("ee-%s-%s", ee.Name, rand.String(5))
-		ee.Status.Phase = ephemeralv1alpha1.PhasePending
-		if err := r.Status().Patch(ctx, &ee, client.MergeFrom(base)); err != nil {
-			return ctrl.Result{}, err
-		}
-		logger.Info("assigned namespace", "namespace", ee.Status.Namespace)
+	if err := r.ensureNamespaceAssigned(ctx, ee); err != nil {
+		return ctrl.Result{}, err
 	}
 	nsName := ee.Status.Namespace
 
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, ns, func() error {
-		if ns.Labels == nil {
-			ns.Labels = map[string]string{}
-		}
-		maps.Copy(ns.Labels, labels)
-		return nil
-	}); err != nil {
+	if err := r.ensureNamespace(ctx, nsName, labels); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.ensureDeployment(ctx, ee, nsName, labels); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.ensureService(ctx, ee, nsName, labels); err != nil {
 		return ctrl.Result{}, err
 	}
 
+	expiry, err := r.updateReadyStatus(ctx, ee)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	logger.Info("environment ready", "namespace", nsName, "expiresAt", expiry)
+	return ctrl.Result{RequeueAfter: time.Until(expiry.Time)}, nil
+}
+
+func (r *EphemeralEnvironmentReconciler) ensureNamespaceAssigned(ctx context.Context, ee *ephemeralv1alpha1.EphemeralEnvironment) error {
+	if ee.Status.Namespace != "" {
+		return nil
+	}
+	logger := log.FromContext(ctx)
+	base := ee.DeepCopy()
+	ee.Status.Namespace = fmt.Sprintf("ee-%s-%s", ee.Name, rand.String(5))
+	ee.Status.Phase = ephemeralv1alpha1.PhasePending
+	if err := r.Status().Patch(ctx, ee, client.MergeFrom(base)); err != nil {
+		return err
+	}
+	logger.Info("assigned namespace", "namespace", ee.Status.Namespace)
+	return nil
+}
+
+func (r *EphemeralEnvironmentReconciler) ensureNamespace(ctx context.Context, nsName string, labels map[string]string) error {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ns, func() error {
+		if ns.Labels == nil {
+			ns.Labels = map[string]string{}
+		}
+		for k, v := range labels {
+			ns.Labels[k] = v
+		}
+		return nil
+	})
+	return err
+}
+
+func (r *EphemeralEnvironmentReconciler) ensureDeployment(ctx context.Context, ee *ephemeralv1alpha1.EphemeralEnvironment, nsName string, labels map[string]string) error {
 	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ee.Name, Namespace: nsName}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		replicas := int32(1)
 		deploy.Spec.Replicas = &replicas
 		deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
@@ -134,40 +185,47 @@ func (r *EphemeralEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 		if tmpl.Labels == nil {
 			tmpl.Labels = map[string]string{}
 		}
-		maps.Copy(tmpl.Labels, labels)
+		for k, v := range labels {
+			tmpl.Labels[k] = v
+		}
 		deploy.Spec.Template = *tmpl
 		return nil
-	}); err != nil {
-		return ctrl.Result{}, err
-	}
+	})
+	return err
+}
 
+func (r *EphemeralEnvironmentReconciler) ensureService(ctx context.Context, ee *ephemeralv1alpha1.EphemeralEnvironment, nsName string, labels map[string]string) error {
 	containers := ee.Spec.Template.Spec.Containers
-	if len(containers) > 0 && len(containers[0].Ports) > 0 {
-		port := containers[0].Ports[0].ContainerPort
-		svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: ee.Name, Namespace: nsName}}
-		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-			svc.Spec.Selector = labels
-			svc.Spec.Ports = []corev1.ServicePort{{
-				Name:       "http",
-				Port:       port,
-				TargetPort: intstr.FromInt32(port),
-			}}
-			return nil
-		}); err != nil {
-			return ctrl.Result{}, err
-		}
+	if len(containers) == 0 || len(containers[0].Ports) == 0 {
+		return nil
 	}
+	port := containers[0].Ports[0].ContainerPort
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: ee.Name, Namespace: nsName}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Spec.Selector = labels
+		svc.Spec.Ports = []corev1.ServicePort{{
+			Name:       "http",
+			Port:       port,
+			TargetPort: intstr.FromInt32(port),
+		}}
+		return nil
+	})
+	return err
+}
+
+func (r *EphemeralEnvironmentReconciler) updateReadyStatus(ctx context.Context, ee *ephemeralv1alpha1.EphemeralEnvironment) (metav1.Time, error) {
 	base := ee.DeepCopy()
 	ee.Status.Phase = ephemeralv1alpha1.PhaseReady
 	expiry := metav1.NewTime(ee.CreationTimestamp.Add(ee.Spec.TTL.Duration))
 	ee.Status.ExpiresAt = &expiry
-	if err := r.Status().Patch(ctx, &ee, client.MergeFrom(base)); err != nil {
-		return ctrl.Result{}, err
+	if err := r.Status().Patch(ctx, ee, client.MergeFrom(base)); err != nil {
+		return metav1.Time{}, err
 	}
+	return expiry, nil
+}
 
-	logger.Info("environment ready", "namespace", nsName, "expiresAt", expiry)
-	requeueAfter := time.Until(expiry.Time)
-	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+func (r *EphemeralEnvironmentReconciler) isExpired(ee *ephemeralv1alpha1.EphemeralEnvironment) bool {
+	return ee.Status.ExpiresAt != nil && time.Now().After(ee.Status.ExpiresAt.Time)
 }
 
 // SetupWithManager sets up the controller with the Manager.
