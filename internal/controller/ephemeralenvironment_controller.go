@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -79,6 +80,18 @@ func (r *EphemeralEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 		controllerutil.AddFinalizer(&ee, ephemeralFinalizer)
 		if err := r.Update(ctx, &ee); err != nil {
 			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if ee.Status.ExpiresAt != nil && time.Now().After(ee.Status.ExpiresAt.Time) {
+		logger.Info("TTL expired, deleting environment", "expiresAt", ee.Status.ExpiresAt)
+		ee.Status.Phase = ephemeralv1alpha1.PhaseExpiring
+		if err := r.Status().Update(ctx, &ee); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.Delete(ctx, &ee); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -150,7 +163,8 @@ func (r *EphemeralEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	logger.Info("environment ready", "namespace", nsName, "expiresAt", expiry)
-	return ctrl.Result{}, nil
+	requeueAfter := time.Until(expiry.Time)
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
