@@ -1,0 +1,13 @@
+apiVersion: v2
+name: ee-operator
+description: A Kubernetes operator that provisions self-destructing, TTL-bounded ephemeral environments.
+type: application
+version: 0.1.0
+appVersion: "0.0.1"
+keywords:
+  - operator
+  - ephemeral
+  - preview-environments
+home: https://github.com/Hoaqim/EE-operator
+sources:
+  - https://github.com/Hoaqim/EE-operator
