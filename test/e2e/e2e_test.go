@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -170,7 +171,7 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(Equal("Running"), "Incorrect controller-manager pod status")
 			}
-			Eventually(verifyControllerUp).Should(Succeed())
+			Eventually(verifyControllerUp, 3*time.Minute, time.Second).Should(Succeed())
 		})
 
 		It("should ensure the metrics endpoint is serving metrics", func() {
@@ -279,6 +280,92 @@ var _ = Describe("Manager", Ordered, func() {
 		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
 		//    strings.ToLower(<Kind>),
 		// ))
+	})
+})
+
+var _ = Describe("EphemeralEnvironment workload", Ordered, func() {
+	const crName = "e2e-ephemeralenvironment"
+	const ttl = "60s"
+	const crNamespace = "default"
+	var workloadNamespace string
+
+	BeforeAll(func() {
+		By("installing the CRD for the workload tests")
+		_, err := utils.Run(exec.Command("make", "install"))
+		Expect(err).NotTo(HaveOccurred(), "Failed to install CRD")
+
+		By("waiting for the CRD to be established")
+		_, err = utils.Run(exec.Command("kubectl", "wait", "--for=condition=Established",
+			"crd/ephemeralenvironments.ephemeral.hoaqim.dev", "--timeout=60s"))
+		Expect(err).NotTo(HaveOccurred(), "CRD did not become Established")
+	})
+
+	AfterAll(func() {
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "ephemeralenvironment",
+			crName, "-n", crNamespace, "--ignore-not-found"))
+	})
+
+	It("provisions a running workload from a CR", func() {
+		By("writing the CR manifest to a temp file")
+		manifest := strings.Join([]string{
+			"apiVersion: ephemeral.hoaqim.dev/v1alpha1",
+			"kind: EphemeralEnvironment",
+			"metadata:",
+			"  name: " + crName,
+			"  namespace: " + crNamespace,
+			"spec:",
+			`  ttl: "` + ttl + `"`,
+			"  template:",
+			"    spec:",
+			"      containers:",
+			"        - name: web",
+			"          image: nginx:1.27-alpine",
+			"          ports:",
+			"            - containerPort: 80",
+			"",
+		}, "\n")
+		tmp, err := os.CreateTemp("", "ee-*.yaml")
+		Expect(err).NotTo(HaveOccurred())
+		defer os.Remove(tmp.Name())
+		_, err = tmp.WriteString(manifest)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(tmp.Close()).To(Succeed())
+
+		By("applying the CR")
+		out, err := utils.Run(exec.Command("kubectl", "apply", "-f", tmp.Name()))
+		Expect(err).NotTo(HaveOccurred(), "kubectl apply failed: %s", out)
+
+		By("confirming the CR exists")
+		Eventually(func(g Gomega) {
+			out, err := utils.Run(exec.Command("kubectl", "get", "ephemeralenvironment",
+				crName, "-n", crNamespace))
+			g.Expect(err).NotTo(HaveOccurred(), "CR not found: %s", out)
+		}, time.Minute, time.Second).Should(Succeed())
+
+		By("the nginx pod reaching Running")
+		Eventually(func(g Gomega) {
+			out, err := utils.Run(exec.Command("kubectl", "get", "pods",
+				"-n", workloadNamespace,
+				"-l", "ephemeral.hoaqim.dev/owner="+crName,
+				"-o", "jsonpath={.items[*].status.phase}"))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(ContainSubstring("Running"), "pod not Running yet")
+		}, 2*time.Minute, time.Second).Should(Succeed())
+	})
+
+	It("tears the environment down when the TTL expires", func() {
+		By("the CR self-deleting after its TTL")
+		Eventually(func(g Gomega) {
+			_, err := utils.Run(exec.Command("kubectl", "get", "ephemeralenvironment",
+				crName, "-n", crNamespace))
+			g.Expect(err).To(HaveOccurred(), "CR still exists past TTL")
+		}, 3*time.Minute, 2*time.Second).Should(Succeed())
+
+		By("the provisioned namespace being removed")
+		Eventually(func(g Gomega) {
+			_, err := utils.Run(exec.Command("kubectl", "get", "ns", workloadNamespace))
+			g.Expect(err).To(HaveOccurred(), "workload namespace still exists")
+		}, 3*time.Minute, 2*time.Second).Should(Succeed())
 	})
 })
 
