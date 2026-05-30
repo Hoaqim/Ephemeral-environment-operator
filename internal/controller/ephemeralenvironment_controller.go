@@ -23,6 +23,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -34,6 +35,8 @@ import (
 
 	ephemeralv1alpha1 "github.com/Hoaqim/EE-operator/api/v1alpha1"
 )
+
+const ephemeralFinalizer = "ephemeral.hoaqim.dev/finalizer"
 
 // EphemeralEnvironmentReconciler reconciles a EphemeralEnvironment object
 type EphemeralEnvironmentReconciler struct {
@@ -53,6 +56,31 @@ func (r *EphemeralEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 	var ee ephemeralv1alpha1.EphemeralEnvironment
 	if err := r.Get(ctx, req.NamespacedName, &ee); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if !ee.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&ee, ephemeralFinalizer) {
+			if ee.Status.Namespace != "" {
+				ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ee.Status.Namespace}}
+				if err := r.Delete(ctx, ns); err != nil && !apierrors.IsNotFound(err) {
+					return ctrl.Result{}, err
+				}
+				logger.Info("deleted namespace", "namespace", ee.Status.Namespace)
+			}
+			controllerutil.RemoveFinalizer(&ee, ephemeralFinalizer)
+			if err := r.Update(ctx, &ee); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if !controllerutil.ContainsFinalizer(&ee, ephemeralFinalizer) {
+		controllerutil.AddFinalizer(&ee, ephemeralFinalizer)
+		if err := r.Update(ctx, &ee); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 
 	labels := map[string]string{
