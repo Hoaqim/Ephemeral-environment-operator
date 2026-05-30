@@ -60,7 +60,7 @@ type EphemeralEnvironmentStatus struct {
 
 	// expiresAt is the time at which the environment tears down
 	// +optional
-	ExpiresAt string `json:"expiresAt,omitempty"`
+	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

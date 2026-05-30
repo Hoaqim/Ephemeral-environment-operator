@@ -8545,6 +8545,7 @@ spec:
               expiresAt:
                 description: expiresAt is the time at which the environment tears
                   down
+                format: date-time
                 type: string
               namespace:
                 description: namespace is name of provisioned namespace

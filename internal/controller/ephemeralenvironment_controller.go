@@ -18,10 +18,18 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"maps"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/rand"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ephemeralv1alpha1 "github.com/Hoaqim/EE-operator/api/v1alpha1"
@@ -36,22 +44,84 @@ type EphemeralEnvironmentReconciler struct {
 // +kubebuilder:rbac:groups=ephemeral.hoaqim.dev,resources=ephemeralenvironments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ephemeral.hoaqim.dev,resources=ephemeralenvironments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ephemeral.hoaqim.dev,resources=ephemeralenvironments/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the EphemeralEnvironment object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
 func (r *EphemeralEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
-	logger.Info("reconciling EphemeralEnvironment", "request", req.NamespacedName)
+	var ee ephemeralv1alpha1.EphemeralEnvironment
+	if err := r.Get(ctx, req.NamespacedName, &ee); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
-	// TODO(user): your logic here
+	labels := map[string]string{
+		"app.kubernetes.io/managed-by": "ephemeral-environment-operator",
+		"ephemeral.hoaqim.dev/owner":   ee.Name,
+	}
 
+	if ee.Status.Namespace == "" {
+		ee.Status.Namespace = fmt.Sprintf("ee-%s-%s", ee.Name, rand.String(5))
+		ee.Status.Phase = ephemeralv1alpha1.PhasePending
+		if err := r.Status().Update(ctx, &ee); err != nil {
+			return ctrl.Result{}, err
+		}
+		logger.Info("assigned namespace", "namespace", ee.Status.Namespace)
+	}
+	nsName := ee.Status.Namespace
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, ns, func() error {
+		if ns.Labels == nil {
+			ns.Labels = map[string]string{}
+		}
+		maps.Copy(ns.Labels, labels)
+		return nil
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ee.Name, Namespace: nsName}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+		replicas := int32(1)
+		deploy.Spec.Replicas = &replicas
+		deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
+
+		tmpl := ee.Spec.Template.DeepCopy()
+		if tmpl.Labels == nil {
+			tmpl.Labels = map[string]string{}
+		}
+		maps.Copy(tmpl.Labels, labels)
+		deploy.Spec.Template = *tmpl
+		return nil
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	containers := ee.Spec.Template.Spec.Containers
+	if len(containers) > 0 && len(containers[0].Ports) > 0 {
+		port := containers[0].Ports[0].ContainerPort
+		svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: ee.Name, Namespace: nsName}}
+		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+			svc.Spec.Selector = labels
+			svc.Spec.Ports = []corev1.ServicePort{{
+				Name:       "http",
+				Port:       port,
+				TargetPort: intstr.FromInt32(port),
+			}}
+			return nil
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	ee.Status.Phase = ephemeralv1alpha1.PhaseReady
+	expiry := metav1.NewTime(ee.CreationTimestamp.Add(ee.Spec.TTL.Duration))
+	ee.Status.ExpiresAt = &expiry
+	if err := r.Status().Update(ctx, &ee); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	logger.Info("environment ready", "namespace", nsName, "expiresAt", expiry)
 	return ctrl.Result{}, nil
 }
 
