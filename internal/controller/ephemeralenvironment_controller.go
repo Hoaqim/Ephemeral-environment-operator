@@ -86,8 +86,9 @@ func (r *EphemeralEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 
 	if ee.Status.ExpiresAt != nil && time.Now().After(ee.Status.ExpiresAt.Time) {
 		logger.Info("TTL expired, deleting environment", "expiresAt", ee.Status.ExpiresAt)
+		base := ee.DeepCopy()
 		ee.Status.Phase = ephemeralv1alpha1.PhaseExpiring
-		if err := r.Status().Update(ctx, &ee); err != nil {
+		if err := r.Status().Patch(ctx, &ee, client.MergeFrom(base)); err != nil {
 			return ctrl.Result{}, err
 		}
 		if err := r.Delete(ctx, &ee); err != nil {
@@ -102,9 +103,10 @@ func (r *EphemeralEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	if ee.Status.Namespace == "" {
+		base := ee.DeepCopy()
 		ee.Status.Namespace = fmt.Sprintf("ee-%s-%s", ee.Name, rand.String(5))
 		ee.Status.Phase = ephemeralv1alpha1.PhasePending
-		if err := r.Status().Update(ctx, &ee); err != nil {
+		if err := r.Status().Patch(ctx, &ee, client.MergeFrom(base)); err != nil {
 			return ctrl.Result{}, err
 		}
 		logger.Info("assigned namespace", "namespace", ee.Status.Namespace)
@@ -155,10 +157,11 @@ func (r *EphemeralEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 			return ctrl.Result{}, err
 		}
 	}
+	base := ee.DeepCopy()
 	ee.Status.Phase = ephemeralv1alpha1.PhaseReady
 	expiry := metav1.NewTime(ee.CreationTimestamp.Add(ee.Spec.TTL.Duration))
 	ee.Status.ExpiresAt = &expiry
-	if err := r.Status().Update(ctx, &ee); err != nil {
+	if err := r.Status().Patch(ctx, &ee, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
 
