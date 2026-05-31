@@ -64,9 +64,55 @@ var _ = BeforeSuite(func() {
 
 	configureKubectlKubeRC()
 	setupCertManager()
+
+	By("creating the manager namespace")
+	cmd = exec.Command("kubectl", "create", "ns", namespace)
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to create manager namespace")
+
+	By("labeling the namespace to enforce the restricted security policy")
+	cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
+		"pod-security.kubernetes.io/enforce=restricted")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+
+	By("installing the CRDs")
+	cmd = exec.Command("make", "install")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to install CRDs")
+
+	By("waiting for the EphemeralEnvironment CRD to be established")
+	cmd = exec.Command("kubectl", "wait", "--for=condition=Established",
+		"crd/ephemeralenvironments.ephemeral.hoaqim.dev", "--timeout=60s")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "CRD did not become Established")
+
+	By("deploying the controller-manager")
+	cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+	By("waiting for the controller-manager deployment to be available")
+	cmd = exec.Command("kubectl", "wait", "--for=condition=Available",
+		"deployment", "-l", "control-plane=controller-manager",
+		"-n", namespace, "--timeout=120s")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "controller-manager did not become Available")
 })
 
 var _ = AfterSuite(func() {
+	By("undeploying the controller-manager")
+	cmd := exec.Command("make", "undeploy")
+	_, _ = utils.Run(cmd)
+
+	By("uninstalling the CRDs")
+	cmd = exec.Command("make", "uninstall")
+	_, _ = utils.Run(cmd)
+
+	By("removing the manager namespace")
+	cmd = exec.Command("kubectl", "delete", "ns", namespace, "--ignore-not-found")
+	_, _ = utils.Run(cmd)
+
 	teardownCertManager()
 })
 

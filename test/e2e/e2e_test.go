@@ -49,49 +49,12 @@ const metricsRoleBindingName = "ee-operator-metrics-binding"
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 
-	// Before running the tests, set up the environment by creating the namespace,
-	// enforce the restricted security policy to the namespace, installing CRDs,
-	// and deploying the controller.
-	BeforeAll(func() {
-		By("creating manager namespace")
-		cmd := exec.Command("kubectl", "create", "ns", namespace)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
-
-		By("labeling the namespace to enforce the restricted security policy")
-		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
-			"pod-security.kubernetes.io/enforce=restricted")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
-
-		By("installing CRDs")
-		cmd = exec.Command("make", "install")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
-
-		By("deploying the controller-manager")
-		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
-	})
-
-	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
-	// and deleting the namespace.
+	// Deploy/undeploy, CRD install, and the manager namespace lifecycle are handled
+	// once at the suite level (see BeforeSuite/AfterSuite). This block only cleans up
+	// the curl pod used for the metrics checks.
 	AfterAll(func() {
 		By("cleaning up the curl pod for metrics")
-		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
-		_, _ = utils.Run(cmd)
-
-		By("undeploying the controller-manager")
-		cmd = exec.Command("make", "undeploy")
-		_, _ = utils.Run(cmd)
-
-		By("uninstalling CRDs")
-		cmd = exec.Command("make", "uninstall")
-		_, _ = utils.Run(cmd)
-
-		By("removing manager namespace")
-		cmd = exec.Command("kubectl", "delete", "ns", namespace)
+		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 	})
 
@@ -176,12 +139,23 @@ var _ = Describe("Manager", Ordered, func() {
 
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
+			// The binding is cluster-scoped and created imperatively here, so it survives
+			// namespace teardown and `make undeploy`. Clear any leftover from a previously
+			// interrupted run to keep the create idempotent, and register cleanup so it does
+			// not leak past this spec.
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "clusterrolebinding",
+				metricsRoleBindingName, "--ignore-not-found"))
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
 				"--clusterrole=ee-operator-metrics-reader",
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
+			DeferCleanup(func() {
+				By("cleaning up the metrics ClusterRoleBinding")
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "clusterrolebinding",
+					metricsRoleBindingName, "--ignore-not-found"))
+			})
 
 			By("validating that the metrics service is available")
 			cmd = exec.Command("kubectl", "get", "service", metricsServiceName, "-n", namespace)
@@ -289,17 +263,7 @@ var _ = Describe("EphemeralEnvironment workload", Ordered, func() {
 	const crNamespace = "default"
 	var workloadNamespace string
 
-	BeforeAll(func() {
-		By("installing the CRD for the workload tests")
-		_, err := utils.Run(exec.Command("make", "install"))
-		Expect(err).NotTo(HaveOccurred(), "Failed to install CRD")
-
-		By("waiting for the CRD to be established")
-		_, err = utils.Run(exec.Command("kubectl", "wait", "--for=condition=Established",
-			"crd/ephemeralenvironments.ephemeral.hoaqim.dev", "--timeout=60s"))
-		Expect(err).NotTo(HaveOccurred(), "CRD did not become Established")
-	})
-
+	// CRD install + establishment is handled once at the suite level (see BeforeSuite).
 	AfterAll(func() {
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "ephemeralenvironment",
 			crName, "-n", crNamespace, "--ignore-not-found"))
@@ -340,6 +304,15 @@ var _ = Describe("EphemeralEnvironment workload", Ordered, func() {
 			out, err := utils.Run(exec.Command("kubectl", "get", "ephemeralenvironment",
 				crName, "-n", crNamespace))
 			g.Expect(err).NotTo(HaveOccurred(), "CR not found: %s", out)
+		}, time.Minute, time.Second).Should(Succeed())
+
+		By("discovering the provisioned namespace from the CR status")
+		Eventually(func(g Gomega) {
+			out, err := utils.Run(exec.Command("kubectl", "get", "ephemeralenvironment",
+				crName, "-n", crNamespace, "-o", "jsonpath={.status.namespace}"))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).NotTo(BeEmpty(), "status.namespace not populated yet")
+			workloadNamespace = strings.TrimSpace(out)
 		}, time.Minute, time.Second).Should(Succeed())
 
 		By("the nginx pod reaching Running")
