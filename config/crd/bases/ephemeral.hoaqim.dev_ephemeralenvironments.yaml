@@ -25,7 +25,7 @@ spec:
       type: string
     - jsonPath: .status.expiresAt
       name: Expires
-      type: date
+      type: string
     - jsonPath: .status.namespace
       name: Namespace
       type: string
@@ -8541,6 +8541,7 @@ spec:
             - template
             type: object
           status:
+            description: EphemeralEnvironmentStatus is the current status of the namespace
             properties:
               expiresAt:
                 description: expiresAt is the time at which the environment tears

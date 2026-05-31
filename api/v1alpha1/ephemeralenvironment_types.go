@@ -21,6 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// EphemeralEnvironmentSpec defines the desired state of EphemeralEnvironment.
 type EphemeralEnvironmentSpec struct {
 	// ttl is how long the environment lives before it automatically tears down
 	// Go duration string eg. "30m"
@@ -49,6 +50,7 @@ const (
 	PhaseFailed EphemeralEnvironmentPhase = "Failed"
 )
 
+// EphemeralEnvironmentStatus is the current status of the namespace
 type EphemeralEnvironmentStatus struct {
 	// phase is the current lifecycle phase of environment
 	// +optional
@@ -68,7 +70,7 @@ type EphemeralEnvironmentStatus struct {
 // +kubebuilder:resource:shortName=ephenv
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="TTL",type="string",JSONPath=".spec.ttl"
-// +kubebuilder:printcolumn:name="Expires",type="date",JSONPath=".status.expiresAt"
+// +kubebuilder:printcolumn:name="Expires",type="string",JSONPath=".status.expiresAt"
 // +kubebuilder:printcolumn:name="Namespace",type="string",JSONPath=".status.namespace"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
