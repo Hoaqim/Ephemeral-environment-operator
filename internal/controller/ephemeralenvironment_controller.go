@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -41,7 +43,8 @@ const ephemeralFinalizer = "ephemeral.hoaqim.dev/finalizer"
 // EphemeralEnvironmentReconciler reconciles a EphemeralEnvironment object
 type EphemeralEnvironmentReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=ephemeral.hoaqim.dev,resources=ephemeralenvironments,verbs=get;list;watch;create;update;patch;delete
@@ -82,6 +85,8 @@ func (r *EphemeralEnvironmentReconciler) reconcileDelete(ctx context.Context, ee
 				return ctrl.Result{}, err
 			}
 			logger.Info("deleted namespace", "namespace", ee.Status.Namespace)
+			r.Recorder.Eventf(ee, corev1.EventTypeNormal, "Cleanup",
+				"Deleted namespace %s", ee.Status.Namespace)
 		}
 		controllerutil.RemoveFinalizer(ee, ephemeralFinalizer)
 		if err := r.Update(ctx, ee); err != nil {
@@ -105,6 +110,8 @@ func (r *EphemeralEnvironmentReconciler) reconcileExpiry(ctx context.Context, ee
 
 	base := ee.DeepCopy()
 	ee.Status.Phase = ephemeralv1alpha1.PhaseExpiring
+	r.Recorder.Event(ee, corev1.EventTypeNormal, "Expired",
+		"TTL elapsed; tearing down environment")
 	if err := r.Status().Patch(ctx, ee, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -126,7 +133,7 @@ func (r *EphemeralEnvironmentReconciler) reconcileNormal(ctx context.Context, ee
 	}
 	nsName := ee.Status.Namespace
 
-	if err := r.ensureNamespace(ctx, nsName, labels); err != nil {
+	if err := r.ensureNamespace(ctx, ee, nsName, labels); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.ensureDeployment(ctx, ee, nsName, labels); err != nil {
@@ -157,21 +164,30 @@ func (r *EphemeralEnvironmentReconciler) ensureNamespaceAssigned(ctx context.Con
 		return err
 	}
 	logger.Info("assigned namespace", "namespace", ee.Status.Namespace)
+	r.Recorder.Eventf(ee, corev1.EventTypeNormal, "NamespaceAssigned",
+		"Assigned namespace %s", ee.Status.Namespace)
+
 	return nil
 }
 
-func (r *EphemeralEnvironmentReconciler) ensureNamespace(ctx context.Context, nsName string, labels map[string]string) error {
+func (r *EphemeralEnvironmentReconciler) ensureNamespace(ctx context.Context, ee *ephemeralv1alpha1.EphemeralEnvironment, nsName string, labels map[string]string) error {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ns, func() error {
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, ns, func() error {
 		if ns.Labels == nil {
 			ns.Labels = map[string]string{}
 		}
-		for k, v := range labels {
-			ns.Labels[k] = v
-		}
+		maps.Copy(ns.Labels, labels)
+
 		return nil
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if op == controllerutil.OperationResultCreated {
+		r.Recorder.Eventf(ee, corev1.EventTypeNormal, "WorkloadProvisioned",
+			"Created namespace %s and workload", nsName)
+	}
+	return nil
 }
 
 func (r *EphemeralEnvironmentReconciler) ensureDeployment(ctx context.Context, ee *ephemeralv1alpha1.EphemeralEnvironment, nsName string, labels map[string]string) error {
