@@ -91,7 +91,7 @@ var _ = BeforeSuite(func() {
 	err = (&EphemeralEnvironmentReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("ephemeralenvironment-controller"),
+		Recorder: mgr.GetEventRecorder("ephemeralenvironment-controller"),
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

@@ -181,7 +181,7 @@ func main() {
 	if err := (&controller.EphemeralEnvironmentReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("ephemeralenvironment-controller"),
+		Recorder: mgr.GetEventRecorder("ephemeralenvironment-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "ephemeralenvironment")
 		os.Exit(1)
